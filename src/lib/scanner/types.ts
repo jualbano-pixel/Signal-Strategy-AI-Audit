@@ -38,6 +38,20 @@ export type EvaluatedRule = RuleDefinition & {
   details: string;
 };
 
+export type RuleNarrativeFields = Partial<
+  Pick<
+    EvaluatedRule,
+    | "message"
+    | "explanation"
+    | "impact"
+    | "whatToDo"
+    | "howToDoIt"
+    | "assignments"
+    | "visibleLayer"
+    | "machineLayer"
+  >
+>;
+
 export type PillarResult = {
   name: PillarName;
   score: number;

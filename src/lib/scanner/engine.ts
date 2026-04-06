@@ -4,6 +4,7 @@ import {
   PillarName,
   PillarResult,
   RuleDefinition,
+  RuleNarrativeFields,
   RuleStatus,
   ScanContext,
   ScanResult,
@@ -198,12 +199,7 @@ function pillarCap(pillar: PillarName, rules: EvaluatedRule[]) {
 
 function withRuleCopy(
   rule: RuleDefinition,
-  updates: Partial<
-    Pick<
-      EvaluatedRule,
-      "message" | "explanation" | "impact" | "whatToDo" | "howToDoIt" | "assignments"
-    >
-  >,
+  updates: RuleNarrativeFields,
 ) {
   return {
     ...rule,
