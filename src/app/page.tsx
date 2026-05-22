@@ -86,6 +86,28 @@ function contextualGlossary(issueId: string) {
   return null;
 }
 
+function evidenceLabel(ok: boolean, blockedLabel = "FAILED") {
+  return ok ? "OK" : blockedLabel;
+}
+
+function evidenceTone(label: string) {
+  if (label === "OK") return "border-accent/15 bg-accent/8 text-accent";
+  if (label === "BLOCKED") return "border-danger/15 bg-danger/7 text-danger";
+  return "border-warn/15 bg-warn/8 text-warn";
+}
+
+function getRetrievalEvidence(scan: ScanResult) {
+  return (
+    scan.retrievalEvidence ?? {
+      siteDiscovery: false,
+      pageReachable: false,
+      articleBodyRetrieved: false,
+      metadataRetrieved: false,
+      fallbackAvailable: false,
+    }
+  );
+}
+
 function scoreTone(score: number) {
   if (score >= 85) return "bg-accent-soft text-accent";
   if (score >= 70) return "bg-[#edf6ff] text-[#205c99]";
@@ -130,6 +152,28 @@ export default function Home() {
   const resultsMode = Boolean(result || loading);
 
   const topFixes = useMemo(() => result?.quick_wins ?? [], [result]);
+  const retrievalEvidence = result ? getRetrievalEvidence(result) : null;
+  const visibilityStack = retrievalEvidence
+    ? [
+        { label: "Site Discovery", value: evidenceLabel(retrievalEvidence.siteDiscovery) },
+        {
+          label: "Page Reachability",
+          value: evidenceLabel(retrievalEvidence.pageReachable, "BLOCKED"),
+        },
+        {
+          label: "Article Retrieval",
+          value: evidenceLabel(retrievalEvidence.articleBodyRetrieved),
+        },
+        {
+          label: "Attribution Retrieval",
+          value: evidenceLabel(retrievalEvidence.metadataRetrieved),
+        },
+        {
+          label: "Fallback Access",
+          value: evidenceLabel(retrievalEvidence.fallbackAvailable),
+        },
+      ]
+    : [];
 
   const subtitleMarkup = (
     <div className="mt-2 space-y-1 text-ink-soft">
@@ -151,6 +195,14 @@ export default function Home() {
     const pillarLines = scan.pillars.map(
       (pillar) => `- ${pillar.name.replaceAll("_", " ")}: ${pillar.score}/25`,
     );
+    const retrievalEvidence = getRetrievalEvidence(scan);
+    const visibilityStack = [
+      `- Site Discovery: ${evidenceLabel(retrievalEvidence.siteDiscovery)}`,
+      `- Page Reachability: ${evidenceLabel(retrievalEvidence.pageReachable, "BLOCKED")}`,
+      `- Article Retrieval: ${evidenceLabel(retrievalEvidence.articleBodyRetrieved)}`,
+      `- Attribution Retrieval: ${evidenceLabel(retrievalEvidence.metadataRetrieved)}`,
+      `- Fallback Access: ${evidenceLabel(retrievalEvidence.fallbackAvailable)}`,
+    ];
 
     const issueLines = scan.top_issues.map((issue, index) => {
       const howToDoIt = issue.howToDoIt.map((step) => `  - ${step}`).join("\n");
@@ -177,7 +229,11 @@ export default function Home() {
       `URL scanned: ${scan.url}`,
       `Overall score: ${scan.total_score}/100`,
       `Retrieval status: ${scan.retrievalStatus}`,
+      `Blocked by type: ${scan.blockedByType ?? "none"}`,
       `Status: ${scan.status}`,
+      "",
+      "Machine Visibility Stack",
+      ...visibilityStack,
       "",
       "Pillar Scores",
       ...pillarLines,
@@ -504,13 +560,42 @@ export default function Home() {
                 </div>
               </div>
 
-              <div className="mt-6 max-w-3xl">
-                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-muted">
-                  URL scanned
-                </p>
-                <p className="mt-2 break-all text-sm leading-6 text-ink-soft">
-                  {result.url}
-                </p>
+              <div className="mt-6 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+                <div className="max-w-3xl">
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-muted">
+                    URL scanned
+                  </p>
+                  <p className="mt-2 break-all text-sm leading-6 text-ink-soft">
+                    {result.url}
+                  </p>
+                </div>
+
+                <div className="rounded-[1.5rem] border border-line bg-white/70 p-4">
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-muted">
+                    Machine visibility stack
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-muted">
+                    What layers of machine visibility succeeded or failed during this scan.
+                  </p>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {visibilityStack.map((item) => (
+                      <div
+                        key={item.label}
+                        className="flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface-strong px-3 py-3"
+                      >
+                        <span className="text-sm text-ink-soft">{item.label}</span>
+                        <span className={`pill border ${evidenceTone(item.value)}`}>
+                          {item.value}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {result.blockedByType ? (
+                    <p className="mt-3 text-sm leading-6 text-muted">
+                      Blocked by type: {result.blockedByType.replaceAll("_", " ")}
+                    </p>
+                  ) : null}
+                </div>
               </div>
 
               <div className="mt-5 max-w-3xl">

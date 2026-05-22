@@ -64,6 +64,22 @@ export type PillarResult = {
 
 export type RetrievalStatus = "OK" | "PARTIAL" | "BLOCKED";
 
+export type BlockedByType =
+  | "cloudflare"
+  | "firewall"
+  | "rate_limit"
+  | "challenge_page"
+  | "unknown"
+  | null;
+
+export type RetrievalEvidence = {
+  siteDiscovery: boolean;
+  pageReachable: boolean;
+  articleBodyRetrieved: boolean;
+  metadataRetrieved: boolean;
+  fallbackAvailable: boolean;
+};
+
 export type ScoreLabel =
   | "AI-Ready"
   | "AI-Ready with Gaps"
@@ -75,6 +91,8 @@ export type ScanResult = {
   url: string;
   total_score: number;
   retrievalStatus: RetrievalStatus;
+  retrievalEvidence: RetrievalEvidence;
+  blockedByType: BlockedByType;
   status: ScoreLabel;
   status_reason: string;
   pillars: PillarResult[];
@@ -112,6 +130,8 @@ export type ScanDebug = {
   retryDelayMs: number;
   renderedContentLikelyRequired: boolean;
   blockedByProtection: boolean;
+  blockedByType: BlockedByType;
+  retrievalEvidence: RetrievalEvidence;
   fallbackAttempted: boolean;
   fallbackType?: FallbackType;
   fallbackSucceeded: boolean;
@@ -165,7 +185,9 @@ export type ScanContext = {
   articlePublisherMatchesOrganization: boolean;
   redirectsFollowed: number;
   blockedByProtection: boolean;
+  blockedByType: BlockedByType;
   articleBodyRetrieved: boolean;
+  retrievalEvidence: RetrievalEvidence;
   titleContainsChallenge: boolean;
   isCloudflareChallenge: boolean;
   fallbackAttempted: boolean;

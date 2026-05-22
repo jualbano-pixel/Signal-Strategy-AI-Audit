@@ -3,7 +3,9 @@ import robotsParser from "robots-parser";
 
 import { buildScanResult } from "@/lib/scanner/engine";
 import {
+  BlockedByType,
   JsonLdNode,
+  RetrievalEvidence,
   ScanContext,
   ScanDebug,
   ScanResult,
@@ -113,6 +115,7 @@ type BlockedDetection = {
   blockedByProtection: boolean;
   titleContainsChallenge: boolean;
   isCloudflareChallenge: boolean;
+  blockedByType: BlockedByType;
 };
 
 type FetchedPage = {
@@ -555,11 +558,23 @@ function detectBlockedRetrieval(
     (statusCode === 403 || statusCode === 429) &&
     isCloudflareChallenge &&
     !extracted.rawHtmlContainsArticleBody;
+  const blockedByType: BlockedByType = blockedByProtection
+    ? cloudflareHeaderPresent
+      ? "cloudflare"
+      : statusCode === 429
+        ? "rate_limit"
+        : titleContainsChallenge || bodyContainsChallenge
+          ? "challenge_page"
+          : statusCode === 403
+            ? "firewall"
+            : "unknown"
+    : null;
 
   return {
     blockedByProtection,
     titleContainsChallenge,
     isCloudflareChallenge,
+    blockedByType,
   };
 }
 
@@ -697,6 +712,36 @@ async function fetchAndExtract(url: string, mode: FetchMode): Promise<FetchedPag
   };
 }
 
+function buildRetrievalEvidence(
+  robotsReachable: boolean,
+  sitemapUrls: string[],
+  blockedByProtection: boolean,
+  statusCode: number,
+  articleBodyRetrieved: boolean,
+  extracted: ExtractedDocument,
+  fallbackSucceeded: boolean,
+): RetrievalEvidence {
+  const siteDiscovery = robotsReachable || sitemapUrls.length > 0;
+  const pageReachable =
+    statusCode >= 200 && statusCode < 400 && !blockedByProtection;
+  const metadataRetrieved =
+    !blockedByProtection &&
+    Boolean(
+      extracted.title ||
+        extracted.publicationDate ||
+        extracted.authorText ||
+        extracted.schemaNodes.length > 0,
+    );
+
+  return {
+    siteDiscovery,
+    pageReachable,
+    articleBodyRetrieved,
+    metadataRetrieved,
+    fallbackAvailable: fallbackSucceeded,
+  };
+}
+
 function buildDebug(
   fetchedUrl: string,
   finalUrl: string,
@@ -707,6 +752,8 @@ function buildDebug(
   browserFallbackTried: boolean,
   browserFallbackUsed: boolean,
   blockedByProtection: boolean,
+  blockedByType: BlockedByType,
+  retrievalEvidence: RetrievalEvidence,
   fallback: FallbackState,
   fetchProfilesTried: FetchMode[],
   retryDelayMs: number,
@@ -737,6 +784,8 @@ function buildDebug(
     renderedContentLikelyRequired:
       !extracted.rawHtmlContainsArticleBody && extracted.rawHtmlContainsTitleText,
     blockedByProtection,
+    blockedByType,
+    retrievalEvidence,
     fallbackAttempted: fallback.attempted,
     fallbackType: fallback.type,
     fallbackSucceeded: fallback.succeeded,
@@ -810,6 +859,7 @@ export async function analyzeUrl(
     page.headers,
   );
   const blockedByProtection = directBlockedDetection.blockedByProtection;
+  const blockedByType = directBlockedDetection.blockedByType;
 
   let analysisHtml = page.html;
   let analysisExtracted = page.extracted;
@@ -902,6 +952,16 @@ export async function analyzeUrl(
     }
   }
 
+  const retrievalEvidence = buildRetrievalEvidence(
+    robotsReachable,
+    sitemapUrls,
+    blockedByProtection,
+    page.response.status,
+    analysisExtracted.rawHtmlContainsArticleBody,
+    analysisExtracted,
+    fallback.succeeded,
+  );
+
   const context: ScanContext = {
     url,
     finalUrl: page.finalUrl,
@@ -947,9 +1007,11 @@ export async function analyzeUrl(
     articlePublisherMatchesOrganization: analysisExtracted.articlePublisherMatchesOrganization,
     redirectsFollowed: page.finalUrl === url ? 0 : 1,
     blockedByProtection,
+    blockedByType,
     articleBodyRetrieved: analysisExtracted.rawHtmlContainsArticleBody,
     titleContainsChallenge: directBlockedDetection.titleContainsChallenge,
     isCloudflareChallenge: directBlockedDetection.isCloudflareChallenge,
+    retrievalEvidence,
     fallbackAttempted: fallback.attempted,
     fallbackType: fallback.type,
     fallbackSucceeded: fallback.succeeded,
@@ -968,6 +1030,8 @@ export async function analyzeUrl(
       browserFallbackTried,
       browserFallbackUsed,
       blockedByProtection,
+      blockedByType,
+      retrievalEvidence,
       fallback,
       fetchProfilesTried,
       retryDelayMs,

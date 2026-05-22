@@ -986,7 +986,7 @@ function overallStatus(
     return {
       status: "Machine Retrieval Blocked",
       status_reason:
-        "The scanner reached a protection screen before it could retrieve the real article HTML.",
+        `The scanner reached a ${context.blockedByType ?? "protection"} screen before it could retrieve the real article HTML.`,
     };
   }
 
@@ -1035,7 +1035,7 @@ function overallStatus(
 
 function buildExplanation(pillars: PillarResult[], currentRetrievalStatus: RetrievalStatus) {
   if (currentRetrievalStatus === "BLOCKED") {
-    return "The scan was blocked by site protection before it could retrieve the real page content. This result reflects access failure first, not ordinary article-quality analysis.";
+    return "The scan reached a protection or challenge layer before the article loaded. Site discovery was checked, but page reachability, article retrieval, attribution retrieval, and fallback access were not successfully confirmed.";
   }
 
   const strongest = [...pillars].sort((a, b) => b.score - a.score)[0];
@@ -1118,6 +1118,8 @@ export function buildScanResult(context: ScanContext): ScanResult {
     url: normalizeUrl(context.url),
     total_score: Math.round(totalScore),
     retrievalStatus: currentRetrievalStatus,
+    retrievalEvidence: context.retrievalEvidence,
+    blockedByType: context.blockedByType,
     status,
     status_reason,
     pillars,
