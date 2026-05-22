@@ -4,8 +4,11 @@ import robotsParser from "robots-parser";
 import { buildScanResult } from "@/lib/scanner/engine";
 import {
   BlockedByType,
+  ConfidenceBucket,
   JsonLdNode,
+  RetrievalAttempt,
   RetrievalEvidence,
+  RetrievalModeUsed,
   ScanContext,
   ScanDebug,
   ScanResult,
@@ -58,9 +61,13 @@ type AnalyzeOptions = {
 
 type ExtractedDocument = {
   title?: string;
+  siteName?: string;
   metaDescription?: string;
   metaRobots?: string;
   canonical?: string;
+  modifiedDate?: string;
+  section?: string;
+  image?: string;
   htmlLang?: string;
   hasViewport: boolean;
   h1Count: number;
@@ -334,9 +341,14 @@ function extractDocument(html: string, finalUrl: string) {
   const $ = cheerio.load(html);
   const extractionErrors: string[] = [];
 
-  const title = textContent($("title").first().text()) || undefined;
+  const title =
+    textContent($("title").first().text()) ||
+    $('meta[property="og:title"]').attr("content")?.trim() ||
+    undefined;
   const metaDescription =
-    $('meta[name="description"]').attr("content")?.trim() || undefined;
+    $('meta[name="description"]').attr("content")?.trim() ||
+    $('meta[property="og:description"]').attr("content")?.trim() ||
+    undefined;
   const metaRobots = $('meta[name="robots"]').attr("content")?.trim() || undefined;
   const canonical = $('link[rel="canonical"]').attr("href")?.trim();
   const htmlLang = $("html").attr("lang")?.trim();
@@ -401,12 +413,29 @@ function extractDocument(html: string, finalUrl: string) {
     $('[itemprop="author"]').first().text().trim() ||
     $('[class*="author" i]').first().text().trim() ||
     $('meta[name="author"]').attr("content")?.trim() ||
+    $('meta[property="article:author"]').attr("content")?.trim() ||
     undefined;
 
   const publicationDate =
     $('meta[property="article:published_time"]').attr("content")?.trim() ||
+    $('meta[name="article:published_time"]').attr("content")?.trim() ||
     $("time[datetime]").first().attr("datetime")?.trim() ||
     $('meta[name="date"]').attr("content")?.trim() ||
+    undefined;
+
+  const modifiedDate =
+    $('meta[property="article:modified_time"]').attr("content")?.trim() ||
+    $('meta[property="og:updated_time"]').attr("content")?.trim() ||
+    undefined;
+
+  const section =
+    $('meta[property="article:section"]').attr("content")?.trim() ||
+    $('meta[name="section"]').attr("content")?.trim() ||
+    undefined;
+
+  const image =
+    $('meta[property="og:image"]').attr("content")?.trim() ||
+    $('meta[name="twitter:image"]').attr("content")?.trim() ||
     undefined;
 
   const links = $("a[href]")
@@ -492,9 +521,13 @@ function extractDocument(html: string, finalUrl: string) {
 
   return {
     title,
+    siteName: siteName || undefined,
     metaDescription,
     metaRobots,
     canonical,
+    modifiedDate,
+    section,
+    image,
     htmlLang,
     hasViewport,
     h1Count,
@@ -575,6 +608,143 @@ function detectBlockedRetrieval(
     titleContainsChallenge,
     isCloudflareChallenge,
     blockedByType,
+  };
+}
+
+function looksLikeChallengeText(value?: string) {
+  const normalized = value?.toLowerCase() ?? "";
+  return normalized.includes("just a moment");
+}
+
+function meaningfulMetadataCount(extracted: ExtractedDocument) {
+  const fields = [
+    extracted.title && !looksLikeChallengeText(extracted.title),
+    extracted.metaDescription && !looksLikeChallengeText(extracted.metaDescription),
+    extracted.canonical,
+    extracted.publicationDate,
+    extracted.modifiedDate,
+    extracted.authorText,
+    extracted.siteName && !looksLikeChallengeText(extracted.siteName),
+    extracted.image,
+    extracted.section,
+    extracted.schemaNodes.length > 0,
+  ];
+
+  return fields.filter(Boolean).length;
+}
+
+function hasMeaningfulMetadata(extracted: ExtractedDocument) {
+  return meaningfulMetadataCount(extracted) >= 2;
+}
+
+function contentConfidenceFromExtracted(extracted: ExtractedDocument): ConfidenceBucket {
+  if (!extracted.rawHtmlContainsArticleBody) {
+    return "LOW";
+  }
+
+  if (extracted.wordCount >= 600 && extracted.paragraphCount >= 4) {
+    return "HIGH";
+  }
+
+  return "MEDIUM";
+}
+
+function metadataConfidenceFromExtracted(extracted: ExtractedDocument): ConfidenceBucket {
+  const count = meaningfulMetadataCount(extracted);
+
+  if (count >= 5) {
+    return "HIGH";
+  }
+
+  if (count >= 2) {
+    return "MEDIUM";
+  }
+
+  return "LOW";
+}
+
+function retrievalModeFromAnalysis(params: {
+  articleBodyRetrieved: boolean;
+  metadataRetrieved: boolean;
+  browserFallbackUsed: boolean;
+  wordpressFallbackUsed: boolean;
+}): RetrievalModeUsed {
+  if (params.articleBodyRetrieved) {
+    if (params.wordpressFallbackUsed) {
+      return "WORDPRESS_REST_FALLBACK";
+    }
+
+    if (params.browserFallbackUsed) {
+      return "BROWSER_LIKE_FETCH";
+    }
+
+    return "STANDARD_FETCH";
+  }
+
+  if (params.metadataRetrieved) {
+    return "METADATA_ONLY";
+  }
+
+  return "FAILED";
+}
+
+function retrievalConfidenceFromMode(mode: RetrievalModeUsed): ConfidenceBucket {
+  if (mode === "STANDARD_FETCH") {
+    return "HIGH";
+  }
+
+  if (mode === "BROWSER_LIKE_FETCH" || mode === "WORDPRESS_REST_FALLBACK") {
+    return "MEDIUM";
+  }
+
+  return "LOW";
+}
+
+function buildAttemptReason(
+  extracted: ExtractedDocument,
+  blockedDetection: BlockedDetection,
+  articleBodyRetrieved: boolean,
+) {
+  if (articleBodyRetrieved) {
+    return "article_body_retrieved";
+  }
+
+  if (blockedDetection.blockedByProtection) {
+    if (blockedDetection.blockedByType === "cloudflare") {
+      return "cloudflare_challenge";
+    }
+
+    if (blockedDetection.blockedByType === "rate_limit") {
+      return "rate_limited";
+    }
+
+    if (blockedDetection.blockedByType === "challenge_page") {
+      return "challenge_page";
+    }
+
+    return "blocked_response";
+  }
+
+  if (hasMeaningfulMetadata(extracted)) {
+    return "metadata_only_available";
+  }
+
+  return "no_article_body_retrieved";
+}
+
+function buildRetrievalAttempt(
+  mode: RetrievalAttempt["mode"],
+  statusCode: number | undefined,
+  extracted: ExtractedDocument,
+  blockedDetection: BlockedDetection,
+): RetrievalAttempt {
+  const articleBodyRetrieved = extracted.rawHtmlContainsArticleBody;
+
+  return {
+    mode,
+    statusCode,
+    succeeded: articleBodyRetrieved,
+    reason: buildAttemptReason(extracted, blockedDetection, articleBodyRetrieved),
   };
 }
 
@@ -724,14 +894,7 @@ function buildRetrievalEvidence(
   const siteDiscovery = robotsReachable || sitemapUrls.length > 0;
   const pageReachable =
     statusCode >= 200 && statusCode < 400 && !blockedByProtection;
-  const metadataRetrieved =
-    !blockedByProtection &&
-    Boolean(
-      extracted.title ||
-        extracted.publicationDate ||
-        extracted.authorText ||
-        extracted.schemaNodes.length > 0,
-    );
+  const metadataRetrieved = hasMeaningfulMetadata(extracted);
 
   return {
     siteDiscovery,
@@ -754,6 +917,11 @@ function buildDebug(
   blockedByProtection: boolean,
   blockedByType: BlockedByType,
   retrievalEvidence: RetrievalEvidence,
+  retrievalModeUsed: RetrievalModeUsed,
+  retrievalConfidence: ConfidenceBucket,
+  contentConfidence: ConfidenceBucket,
+  metadataConfidence: ConfidenceBucket,
+  retrievalAttempts: RetrievalAttempt[],
   fallback: FallbackState,
   fetchProfilesTried: FetchMode[],
   retryDelayMs: number,
@@ -786,6 +954,11 @@ function buildDebug(
     blockedByProtection,
     blockedByType,
     retrievalEvidence,
+    retrievalModeUsed,
+    retrievalConfidence,
+    contentConfidence,
+    metadataConfidence,
+    retrievalAttempts,
     fallbackAttempted: fallback.attempted,
     fallbackType: fallback.type,
     fallbackSucceeded: fallback.succeeded,
@@ -810,11 +983,21 @@ export async function analyzeUrl(
     attempted: false,
     succeeded: false,
   };
+  const retrievalAttempts: RetrievalAttempt[] = [];
+  let wordpressFallbackUsed = false;
 
   const initialBlockedDetection = detectBlockedRetrieval(
     page.response.status,
     page.extracted,
     page.headers,
+  );
+  retrievalAttempts.push(
+    buildRetrievalAttempt(
+      "STANDARD_FETCH",
+      page.response.status,
+      page.extracted,
+      initialBlockedDetection,
+    ),
   );
 
   if (shouldTryBrowserFallback(page.extracted) || initialBlockedDetection.blockedByProtection) {
@@ -828,6 +1011,19 @@ export async function analyzeUrl(
 
     try {
       const fallbackPage = await fetchAndExtract(url, "browser-fallback");
+      const browserBlockedDetection = detectBlockedRetrieval(
+        fallbackPage.response.status,
+        fallbackPage.extracted,
+        fallbackPage.headers,
+      );
+      retrievalAttempts.push(
+        buildRetrievalAttempt(
+          "BROWSER_LIKE_FETCH",
+          fallbackPage.response.status,
+          fallbackPage.extracted,
+          browserBlockedDetection,
+        ),
+      );
       fallback = {
         attempted: true,
         type: "browser-fallback",
@@ -845,6 +1041,11 @@ export async function analyzeUrl(
       }
     } catch {
       page.extracted.extractionErrors.push("browser-fallback-fetch-failed");
+      retrievalAttempts.push({
+        mode: "BROWSER_LIKE_FETCH",
+        succeeded: false,
+        reason: "fetch_failed",
+      });
       fallback = {
         attempted: true,
         type: "browser-fallback",
@@ -883,19 +1084,46 @@ export async function analyzeUrl(
 
       if (wpFallback.html) {
         const wpExtracted = extractDocument(wpFallback.html, url);
+        const wpBlockedDetection = detectBlockedRetrieval(
+          wpFallback.statusCode ?? 200,
+          wpExtracted,
+          {},
+        );
+        retrievalAttempts.push(
+          buildRetrievalAttempt(
+            "WORDPRESS_REST_FALLBACK",
+            wpFallback.statusCode,
+            wpExtracted,
+            wpBlockedDetection,
+          ),
+        );
         const shouldUseFallback =
           blockedByProtection ||
           wpExtracted.wordCount > analysisExtracted.wordCount ||
           wpExtracted.paragraphCount > analysisExtracted.paragraphCount ||
-          wpExtracted.headingCount > analysisExtracted.headingCount;
+          wpExtracted.headingCount > analysisExtracted.headingCount ||
+          (!analysisExtracted.rawHtmlContainsArticleBody && hasMeaningfulMetadata(wpExtracted));
 
         if (shouldUseFallback) {
           analysisHtml = wpFallback.html;
           analysisExtracted = wpExtracted;
+          wordpressFallbackUsed = true;
         }
+      } else if (wpFallback.attempted) {
+        retrievalAttempts.push({
+          mode: "WORDPRESS_REST_FALLBACK",
+          statusCode: wpFallback.statusCode,
+          succeeded: false,
+          reason: blockedByProtection ? "blocked_response" : "no_article_body_retrieved",
+        });
       }
     } catch {
       page.extracted.extractionErrors.push("wordpress-rest-api-fallback-failed");
+      retrievalAttempts.push({
+        mode: "WORDPRESS_REST_FALLBACK",
+        succeeded: false,
+        reason: "fetch_failed",
+      });
       fallback = {
         attempted: true,
         type: "wordpress-rest-api",
@@ -961,6 +1189,15 @@ export async function analyzeUrl(
     analysisExtracted,
     fallback.succeeded,
   );
+  const retrievalModeUsed = retrievalModeFromAnalysis({
+    articleBodyRetrieved: analysisExtracted.rawHtmlContainsArticleBody,
+    metadataRetrieved: retrievalEvidence.metadataRetrieved,
+    browserFallbackUsed,
+    wordpressFallbackUsed,
+  });
+  const retrievalConfidence = retrievalConfidenceFromMode(retrievalModeUsed);
+  const contentConfidence = contentConfidenceFromExtracted(analysisExtracted);
+  const metadataConfidence = metadataConfidenceFromExtracted(analysisExtracted);
 
   const context: ScanContext = {
     url,
@@ -977,10 +1214,14 @@ export async function analyzeUrl(
     sitemapUrls,
     headers: page.headers,
     title: analysisExtracted.title,
+    siteName: analysisExtracted.siteName,
     metaDescription: analysisExtracted.metaDescription,
     metaRobots: analysisExtracted.metaRobots,
     xRobotsTag: page.headers["x-robots-tag"],
     canonical: analysisExtracted.canonical,
+    modifiedDate: analysisExtracted.modifiedDate,
+    section: analysisExtracted.section,
+    image: analysisExtracted.image,
     hasViewport: analysisExtracted.hasViewport,
     h1Count: analysisExtracted.h1Count,
     mainH1Count: analysisExtracted.mainH1Count,
@@ -1009,9 +1250,14 @@ export async function analyzeUrl(
     blockedByProtection,
     blockedByType,
     articleBodyRetrieved: analysisExtracted.rawHtmlContainsArticleBody,
+    retrievalEvidence,
+    retrievalModeUsed,
+    retrievalConfidence,
+    contentConfidence,
+    metadataConfidence,
+    retrievalAttempts,
     titleContainsChallenge: directBlockedDetection.titleContainsChallenge,
     isCloudflareChallenge: directBlockedDetection.isCloudflareChallenge,
-    retrievalEvidence,
     fallbackAttempted: fallback.attempted,
     fallbackType: fallback.type,
     fallbackSucceeded: fallback.succeeded,
@@ -1032,6 +1278,11 @@ export async function analyzeUrl(
       blockedByProtection,
       blockedByType,
       retrievalEvidence,
+      retrievalModeUsed,
+      retrievalConfidence,
+      contentConfidence,
+      metadataConfidence,
+      retrievalAttempts,
       fallback,
       fetchProfilesTried,
       retryDelayMs,

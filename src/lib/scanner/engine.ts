@@ -44,6 +44,20 @@ const BLOCKED_DISPLAY_RULES = new Set([
   "basic_performance",
 ]);
 
+const METADATA_ONLY_DISPLAY_RULES = new Set([
+  "fetch_access_blocked",
+  "robots_accessible",
+  "crawlability_allowed",
+  "sitemap_present",
+  "meta_noindex_present",
+  "snippet_eligibility",
+  "canonical_present",
+  "basic_performance",
+  "html_structure",
+  "publication_date",
+  "author_presence",
+]);
+
 function includesDirective(value: string | undefined, needle: string) {
   return value?.toLowerCase().includes(needle) ?? false;
 }
@@ -69,7 +83,7 @@ function hasStrongArticleStructure(context: ScanContext) {
 }
 
 function contentAnalysisBlocked(context: ScanContext) {
-  return retrievalStatus(context) === "BLOCKED";
+  return !context.articleBodyRetrieved;
 }
 
 function normalizeWords(value: string | undefined) {
@@ -790,15 +804,21 @@ function buildPillarSummary(
 ) {
   if (contentAnalysisBlocked(context)) {
     if (name === "FINDABILITY") {
-      return "Basic site discovery signals were found, but this page could not be confirmed as machine-retrievable.";
+      return context.retrievalEvidence.pageReachable
+        ? "Site discovery signals were found, but full article retrieval was only partial."
+        : "Basic site discovery signals were found, but this page could not be confirmed as machine-retrievable.";
     }
 
     if (name === "INTERPRETATION" || name === "ATTRIBUTION") {
-      return `${name.replaceAll("_", " ")} could not be fully analyzed because page access was blocked before the article loaded.`;
+      return context.retrievalEvidence.metadataRetrieved
+        ? `${name.replaceAll("_", " ")} is based on metadata-only analysis because the article body could not be retrieved.`
+        : `${name.replaceAll("_", " ")} could not be fully analyzed because the article body was not available to the scanner.`;
     }
 
     if (name === "DELIVERY") {
-      return "DELIVERY is mainly limited by access.";
+      return context.retrievalEvidence.fallbackAvailable
+        ? "DELIVERY depended on a fallback retrieval path."
+        : "DELIVERY is mainly limited by access or incomplete retrieval.";
     }
   }
   const failed = rules.filter((rule) => rule.status === "fail");
@@ -818,14 +838,18 @@ function retrievalStatus(context: ScanContext): RetrievalStatus {
     context.statusCode === 403 ||
     context.statusCode === 429 ||
     context.isCloudflareChallenge ||
-    context.titleContainsChallenge ||
-    !context.articleBodyRetrieved;
+    context.titleContainsChallenge;
 
   if (blocked) {
     return "BLOCKED";
   }
 
-  if (context.articleBodyRetrieved && (context.fallbackAttempted || context.fallbackSucceeded)) {
+  if (
+    !context.articleBodyRetrieved ||
+    context.retrievalModeUsed === "BROWSER_LIKE_FETCH" ||
+    context.retrievalModeUsed === "WORDPRESS_REST_FALLBACK" ||
+    context.retrievalModeUsed === "METADATA_ONLY"
+  ) {
     return "PARTIAL";
   }
 
@@ -873,29 +897,40 @@ function buildSignalsSummary(
     if (pillar === "FINDABILITY") {
       return {
         detected: [
-          "robots.txt is reachable.",
+          ...(context.robotsReachable ? ["robots.txt is reachable."] : []),
           ...(context.sitemapUrls.length > 0 ? ["Found sitemap signals."] : []),
+          ...(context.retrievalEvidence.metadataRetrieved ? ["Basic page metadata was retrieved."] : []),
         ],
         unclear: [
-          "The article page itself could not be confirmed as crawlable because the scanner reached a protection screen.",
+          retrievalStatus(context) === "BLOCKED"
+            ? "The article page itself could not be confirmed as crawlable because the scanner reached a protection screen."
+            : "The article body was not fully retrievable from the page response.",
         ],
       };
     }
 
     if (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION") {
       return {
-        detected: [],
+        detected: context.retrievalEvidence.metadataRetrieved
+          ? ["Metadata signals were available for limited analysis."]
+          : [],
         unclear: [
-          "This pillar could not be fully analyzed because page access was blocked before the article loaded.",
+          context.retrievalEvidence.metadataRetrieved
+            ? "The article body was not retrieved, so this pillar is based only on metadata-level signals."
+            : "This pillar could not be fully analyzed because the article body was not available to the scanner.",
         ],
       };
     }
 
     if (pillar === "DELIVERY") {
       return {
-        detected: [],
+        detected: context.retrievalEvidence.fallbackAvailable
+          ? ["A fallback retrieval path returned usable signals."]
+          : [],
         unclear: [
-          "The scanner reached a protection screen before it could retrieve the real page HTML.",
+          retrievalStatus(context) === "BLOCKED"
+            ? "The scanner reached a protection screen before it could retrieve the real page HTML."
+            : "The scanner could not retrieve the full article body from the page response.",
         ],
       };
     }
@@ -986,7 +1021,9 @@ function overallStatus(
     return {
       status: "Machine Retrieval Blocked",
       status_reason:
-        `The scanner reached a ${context.blockedByType ?? "protection"} screen before it could retrieve the real article HTML.`,
+        context.retrievalEvidence.metadataRetrieved
+          ? `The scanner reached a ${context.blockedByType ?? "protection"} screen before it could retrieve the full article body. Metadata-only analysis was still available.`
+          : `The scanner reached a ${context.blockedByType ?? "protection"} screen before it could retrieve the real article HTML.`,
     };
   }
 
@@ -1033,9 +1070,19 @@ function overallStatus(
   };
 }
 
-function buildExplanation(pillars: PillarResult[], currentRetrievalStatus: RetrievalStatus) {
+function buildExplanation(
+  pillars: PillarResult[],
+  currentRetrievalStatus: RetrievalStatus,
+  context: ScanContext,
+) {
   if (currentRetrievalStatus === "BLOCKED") {
-    return "The scan reached a protection or challenge layer before the article loaded. Site discovery was checked, but page reachability, article retrieval, attribution retrieval, and fallback access were not successfully confirmed.";
+    return context.retrievalEvidence.metadataRetrieved
+      ? "The article body could not be retrieved, but metadata signals were available. This scan can identify basic discovery and attribution signals, but cannot fully evaluate interpretation quality."
+      : "The scan reached a protection or challenge layer before the article loaded. Site discovery was checked, but page reachability, article retrieval, attribution retrieval, and fallback access were not successfully confirmed.";
+  }
+
+  if (currentRetrievalStatus === "PARTIAL" && context.retrievalModeUsed === "METADATA_ONLY") {
+    return "The article body could not be retrieved, but metadata signals were available. This scan can identify basic discovery and attribution signals, but cannot fully evaluate interpretation quality.";
   }
 
   const strongest = [...pillars].sort((a, b) => b.score - a.score)[0];
@@ -1047,8 +1094,11 @@ function buildExplanation(pillars: PillarResult[], currentRetrievalStatus: Retri
 export function buildScanResult(context: ScanContext): ScanResult {
   const evaluatedRules = RULES.map((rule) => evaluateRule(rule, context));
   const currentRetrievalStatus = retrievalStatus(context);
+  const limitedToMetadata = contentAnalysisBlocked(context) && context.retrievalEvidence.metadataRetrieved;
   const displayRules = contentAnalysisBlocked(context)
-    ? evaluatedRules.filter((rule) => BLOCKED_DISPLAY_RULES.has(rule.id))
+    ? evaluatedRules.filter((rule) =>
+        (limitedToMetadata ? METADATA_ONLY_DISPLAY_RULES : BLOCKED_DISPLAY_RULES).has(rule.id),
+      )
     : evaluatedRules;
 
   const blockedRetrieval = contentAnalysisBlocked(context);
@@ -1063,7 +1113,7 @@ export function buildScanResult(context: ScanContext): ScanResult {
     const pillarDisplayRules = displayRules.filter((rule) => rule.pillar === pillar);
     const scoringRules = blockedRetrieval
       ? pillar === "INTERPRETATION" || pillar === "ATTRIBUTION"
-        ? []
+        ? pillarDisplayRules
         : pillar === "DELIVERY"
           ? pillarDisplayRules
           : pillarRules
@@ -1075,9 +1125,7 @@ export function buildScanResult(context: ScanContext): ScanResult {
     ).length;
     const stackingPenalty = criticalCount > 1 ? (criticalCount - 1) * 2 : 0;
     const uncappedScore = Math.max(0, baseScore - penalty - stackingPenalty);
-    const score = blockedRetrieval && (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION")
-      ? 0
-      : Math.min(uncappedScore, pillarCap(pillar, scoringRules));
+    const score = Math.min(uncappedScore, pillarCap(pillar, scoringRules));
     const confidence =
       blockedRetrieval &&
       (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION")
@@ -1118,7 +1166,11 @@ export function buildScanResult(context: ScanContext): ScanResult {
     url: normalizeUrl(context.url),
     total_score: Math.round(totalScore),
     retrievalStatus: currentRetrievalStatus,
+    retrievalModeUsed: context.retrievalModeUsed,
     retrievalEvidence: context.retrievalEvidence,
+    retrievalConfidence: context.retrievalConfidence,
+    contentConfidence: context.contentConfidence,
+    metadataConfidence: context.metadataConfidence,
     blockedByType: context.blockedByType,
     status,
     status_reason,
@@ -1128,7 +1180,7 @@ export function buildScanResult(context: ScanContext): ScanResult {
       .slice(0, 3)
       .map((rule) => rule.whatToDo)
       .filter(Boolean),
-    explanation: buildExplanation(pillars, currentRetrievalStatus),
+    explanation: buildExplanation(pillars, currentRetrievalStatus, context),
     scanned_at: new Date().toISOString(),
   };
 }

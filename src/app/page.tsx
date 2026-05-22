@@ -108,6 +108,15 @@ function getRetrievalEvidence(scan: ScanResult) {
   );
 }
 
+function getRetrievalProfile(scan: ScanResult) {
+  return {
+    retrievalModeUsed: scan.retrievalModeUsed ?? "FAILED",
+    retrievalConfidence: scan.retrievalConfidence ?? "LOW",
+    contentConfidence: scan.contentConfidence ?? "LOW",
+    metadataConfidence: scan.metadataConfidence ?? "LOW",
+  };
+}
+
 function scoreTone(score: number) {
   if (score >= 85) return "bg-accent-soft text-accent";
   if (score >= 70) return "bg-[#edf6ff] text-[#205c99]";
@@ -153,6 +162,7 @@ export default function Home() {
 
   const topFixes = useMemo(() => result?.quick_wins ?? [], [result]);
   const retrievalEvidence = result ? getRetrievalEvidence(result) : null;
+  const retrievalProfile = result ? getRetrievalProfile(result) : null;
   const visibilityStack = retrievalEvidence
     ? [
         { label: "Site Discovery", value: evidenceLabel(retrievalEvidence.siteDiscovery) },
@@ -196,6 +206,7 @@ export default function Home() {
       (pillar) => `- ${pillar.name.replaceAll("_", " ")}: ${pillar.score}/25`,
     );
     const retrievalEvidence = getRetrievalEvidence(scan);
+    const retrievalProfile = getRetrievalProfile(scan);
     const visibilityStack = [
       `- Site Discovery: ${evidenceLabel(retrievalEvidence.siteDiscovery)}`,
       `- Page Reachability: ${evidenceLabel(retrievalEvidence.pageReachable, "BLOCKED")}`,
@@ -229,6 +240,10 @@ export default function Home() {
       `URL scanned: ${scan.url}`,
       `Overall score: ${scan.total_score}/100`,
       `Retrieval status: ${scan.retrievalStatus}`,
+      `Retrieval mode: ${retrievalProfile.retrievalModeUsed}`,
+      `Retrieval confidence: ${retrievalProfile.retrievalConfidence}`,
+      `Content confidence: ${retrievalProfile.contentConfidence}`,
+      `Metadata confidence: ${retrievalProfile.metadataConfidence}`,
       `Blocked by type: ${scan.blockedByType ?? "none"}`,
       `Status: ${scan.status}`,
       "",
@@ -590,6 +605,26 @@ export default function Home() {
                       </div>
                     ))}
                   </div>
+                  {retrievalProfile ? (
+                    <div className="mt-3 grid gap-2 rounded-2xl border border-line bg-surface-strong px-3 py-3 text-sm text-ink-soft">
+                      <p>
+                        <span className="font-semibold text-foreground">Retrieval mode:</span>{" "}
+                        {retrievalProfile.retrievalModeUsed.replaceAll("_", " ")}
+                      </p>
+                      <p>
+                        <span className="font-semibold text-foreground">Retrieval confidence:</span>{" "}
+                        {retrievalProfile.retrievalConfidence}
+                      </p>
+                      <p>
+                        <span className="font-semibold text-foreground">Content confidence:</span>{" "}
+                        {retrievalProfile.contentConfidence}
+                      </p>
+                      <p>
+                        <span className="font-semibold text-foreground">Metadata confidence:</span>{" "}
+                        {retrievalProfile.metadataConfidence}
+                      </p>
+                    </div>
+                  ) : null}
                   {result.blockedByType ? (
                     <p className="mt-3 text-sm leading-6 text-muted">
                       Blocked by type: {result.blockedByType.replaceAll("_", " ")}

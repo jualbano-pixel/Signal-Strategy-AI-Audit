@@ -63,6 +63,13 @@ export type PillarResult = {
 };
 
 export type RetrievalStatus = "OK" | "PARTIAL" | "BLOCKED";
+export type RetrievalModeUsed =
+  | "STANDARD_FETCH"
+  | "BROWSER_LIKE_FETCH"
+  | "WORDPRESS_REST_FALLBACK"
+  | "METADATA_ONLY"
+  | "FAILED";
+export type ConfidenceBucket = "HIGH" | "MEDIUM" | "LOW";
 
 export type BlockedByType =
   | "cloudflare"
@@ -80,6 +87,16 @@ export type RetrievalEvidence = {
   fallbackAvailable: boolean;
 };
 
+export type RetrievalAttempt = {
+  mode:
+    | "STANDARD_FETCH"
+    | "BROWSER_LIKE_FETCH"
+    | "WORDPRESS_REST_FALLBACK";
+  statusCode?: number;
+  succeeded: boolean;
+  reason: string;
+};
+
 export type ScoreLabel =
   | "AI-Ready"
   | "AI-Ready with Gaps"
@@ -91,7 +108,11 @@ export type ScanResult = {
   url: string;
   total_score: number;
   retrievalStatus: RetrievalStatus;
+  retrievalModeUsed: RetrievalModeUsed;
   retrievalEvidence: RetrievalEvidence;
+  retrievalConfidence: ConfidenceBucket;
+  contentConfidence: ConfidenceBucket;
+  metadataConfidence: ConfidenceBucket;
   blockedByType: BlockedByType;
   status: ScoreLabel;
   status_reason: string;
@@ -116,6 +137,7 @@ export type ScanDebug = {
   paragraphCount: number;
   h1Candidates: string[];
   title?: string;
+  siteName?: string;
   metaDescription?: string;
   canonical?: string;
   detectedArticleSelectors: string[];
@@ -132,6 +154,11 @@ export type ScanDebug = {
   blockedByProtection: boolean;
   blockedByType: BlockedByType;
   retrievalEvidence: RetrievalEvidence;
+  retrievalModeUsed: RetrievalModeUsed;
+  retrievalConfidence: ConfidenceBucket;
+  contentConfidence: ConfidenceBucket;
+  metadataConfidence: ConfidenceBucket;
+  retrievalAttempts: RetrievalAttempt[];
   fallbackAttempted: boolean;
   fallbackType?: FallbackType;
   fallbackSucceeded: boolean;
@@ -155,10 +182,14 @@ export type ScanContext = {
   sitemapUrls: string[];
   headers: Record<string, string>;
   title?: string;
+  siteName?: string;
   metaDescription?: string;
   metaRobots?: string;
   xRobotsTag?: string;
   canonical?: string;
+  modifiedDate?: string;
+  section?: string;
+  image?: string;
   hasViewport: boolean;
   h1Count: number;
   mainH1Count: number;
@@ -188,6 +219,11 @@ export type ScanContext = {
   blockedByType: BlockedByType;
   articleBodyRetrieved: boolean;
   retrievalEvidence: RetrievalEvidence;
+  retrievalModeUsed: RetrievalModeUsed;
+  retrievalConfidence: ConfidenceBucket;
+  contentConfidence: ConfidenceBucket;
+  metadataConfidence: ConfidenceBucket;
+  retrievalAttempts: RetrievalAttempt[];
   titleContainsChallenge: boolean;
   isCloudflareChallenge: boolean;
   fallbackAttempted: boolean;
