@@ -15,6 +15,7 @@ const CRITICAL_RULES = new Set([
   "robots_accessible",
   "canonical_present",
   "sitemap_present",
+  "fetch_access_blocked",
 ]);
 
 const MODERATE_RULES = new Set([
@@ -32,6 +33,15 @@ const LOW_VALUE_STRUCTURE_RULES = new Set([
   "heading_hierarchy",
   "paragraph_structure",
   "extractable_main_content",
+]);
+
+const BLOCKED_DISPLAY_RULES = new Set([
+  "fetch_access_blocked",
+  "redirect_health",
+  "robots_accessible",
+  "crawlability_allowed",
+  "sitemap_present",
+  "basic_performance",
 ]);
 
 function includesDirective(value: string | undefined, needle: string) {
@@ -56,6 +66,10 @@ function hasStrongArticleStructure(context: ScanContext) {
   ];
 
   return articleSignals.filter(Boolean).length >= 4;
+}
+
+function contentAnalysisBlocked(context: ScanContext) {
+  return context.blockedByProtection && !context.fallbackSucceeded;
 }
 
 function normalizeWords(value: string | undefined) {
@@ -213,6 +227,18 @@ function evaluateRule(rule: RuleDefinition, context: ScanContext): EvaluatedRule
   let resolvedRule = rule;
 
   switch (rule.id) {
+    case "fetch_access_blocked":
+      status = context.blockedByProtection
+        ? context.fallbackSucceeded
+          ? "warn"
+          : "fail"
+        : "pass";
+      details = context.blockedByProtection
+        ? context.fallbackSucceeded
+          ? `Direct page fetch was blocked, but ${context.fallbackType === "wordpress-rest-api" ? "a WordPress API fallback returned article content" : "a fallback path returned article content"}.`
+          : "Direct page fetch returned a protection screen instead of the article content."
+        : "The scan received the real page content without a protection interstitial.";
+      break;
     case "robots_accessible":
       status = context.robotsReachable ? "pass" : "fail";
       details = context.robotsReachable
@@ -757,7 +783,20 @@ function evaluateRule(rule: RuleDefinition, context: ScanContext): EvaluatedRule
   };
 }
 
-function buildPillarSummary(name: PillarName, rules: EvaluatedRule[]) {
+function buildPillarSummary(
+  name: PillarName,
+  rules: EvaluatedRule[],
+  context: ScanContext,
+) {
+  if (contentAnalysisBlocked(context)) {
+    if (name === "INTERPRETATION" || name === "ATTRIBUTION") {
+      return `${name.replaceAll("_", " ")} could not be fully analyzed because page access was blocked before the article loaded.`;
+    }
+
+    if (name === "DELIVERY") {
+      return "DELIVERY is mainly limited by access.";
+    }
+  }
   const failed = rules.filter((rule) => rule.status === "fail");
   const warned = rules.filter((rule) => rule.status === "warn");
 
@@ -801,13 +840,38 @@ function dedupeByRootCause(rules: EvaluatedRule[]) {
   return [...seen.values()];
 }
 
-function buildSignalsSummary(rules: EvaluatedRule[]) {
+function buildSignalsSummary(
+  rules: EvaluatedRule[],
+  context: ScanContext,
+  pillar: PillarName,
+) {
+  if (contentAnalysisBlocked(context)) {
+    if (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION") {
+      return {
+        detected: [],
+        unclear: [
+          "This pillar could not be confirmed because the scan reached a protection screen instead of the article.",
+        ],
+      };
+    }
+
+    if (pillar === "DELIVERY") {
+      return {
+        detected: [],
+        unclear: [
+          "The scanner reached a protection screen before it could retrieve the real page HTML.",
+        ],
+      };
+    }
+  }
   const detected = rules
     .filter((rule) => rule.status === "pass")
     .sort((a, b) => b.weight - a.weight)
     .slice(0, 4)
     .map((rule) => {
       switch (rule.id) {
+        case "fetch_access_blocked":
+          return "The scanner reached the real page content without a protection screen.";
         case "publisher_identity":
           return "Publisher details were clearly detected.";
         case "author_presence":
@@ -846,6 +910,8 @@ function buildSignalsSummary(rules: EvaluatedRule[]) {
     .slice(0, 4)
     .map((rule) => {
       switch (rule.id) {
+        case "fetch_access_blocked":
+          return "Page access was blocked before the real article HTML could be fetched.";
         case "publisher_identity":
           return "Publisher details are not fully connected to this page.";
         case "author_presence":
@@ -930,6 +996,9 @@ function buildExplanation(pillars: PillarResult[]) {
 
 export function buildScanResult(context: ScanContext): ScanResult {
   const evaluatedRules = RULES.map((rule) => evaluateRule(rule, context));
+  const displayRules = contentAnalysisBlocked(context)
+    ? evaluatedRules.filter((rule) => BLOCKED_DISPLAY_RULES.has(rule.id))
+    : evaluatedRules;
 
   const pillars: PillarResult[] = ([
     "FINDABILITY",
@@ -938,6 +1007,7 @@ export function buildScanResult(context: ScanContext): ScanResult {
     "DELIVERY",
   ] as const).map((pillar) => {
     const pillarRules = evaluatedRules.filter((rule) => rule.pillar === pillar);
+    const pillarDisplayRules = displayRules.filter((rule) => rule.pillar === pillar);
     const baseScore = 25;
     const penalty = pillarPenalty(pillar, pillarRules);
     const criticalCount = pillarRules.filter(
@@ -951,25 +1021,25 @@ export function buildScanResult(context: ScanContext): ScanResult {
       name: pillar,
       score,
       confidence: pillarConfidence(score),
-      issues: pillarRules.filter((rule) => rule.status !== "pass"),
-      summary: buildPillarSummary(pillar, pillarRules),
-      ...buildSignalsSummary(pillarRules),
+      issues: pillarDisplayRules.filter((rule) => rule.status !== "pass"),
+      summary: buildPillarSummary(pillar, pillarDisplayRules, context),
+      ...buildSignalsSummary(pillarDisplayRules, context, pillar),
     };
   });
 
   const totalScore = pillars.reduce((sum, pillar) => sum + pillar.score, 0);
   const { status, status_reason } = overallStatus(totalScore, pillars);
   const prioritized = dedupeByRootCause(
-    evaluatedRules
-    .filter((rule) => rule.status !== "pass")
-    .sort((a, b) => {
-      const severityRank = { high: 3, medium: 2, low: 1 };
-      return (
-        severityRank[b.severity] - severityRank[a.severity] ||
-        b.weight - a.weight ||
-        a.id.localeCompare(b.id)
-      );
-    }),
+    displayRules
+      .filter((rule) => rule.status !== "pass")
+      .sort((a, b) => {
+        const severityRank = { high: 3, medium: 2, low: 1 };
+        return (
+          severityRank[b.severity] - severityRank[a.severity] ||
+          b.weight - a.weight ||
+          a.id.localeCompare(b.id)
+        );
+      }),
   );
 
   return {

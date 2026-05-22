@@ -46,6 +46,7 @@ const ARTICLE_CONTAINER_SELECTORS = [
 ];
 
 type FetchMode = "scanner" | "browser-fallback";
+type FallbackType = "browser-fallback" | "wordpress-rest-api";
 
 type AnalyzeOptions = {
   debug?: boolean;
@@ -89,6 +90,30 @@ type ExtractedDocument = {
   rawHtmlContainsTitleText: boolean;
   rawHtmlContainsArticleBody: boolean;
   extractionErrors: string[];
+  bodyText: string;
+};
+
+type FallbackState = {
+  attempted: boolean;
+  type?: FallbackType;
+  succeeded: boolean;
+  statusCode?: number;
+};
+
+type WordPressFallbackResult = {
+  attempted: boolean;
+  statusCode?: number;
+  html?: string;
+  sourceUrl?: string;
+};
+
+type FetchedPage = {
+  response: Response;
+  responseTimeMs: number;
+  html: string;
+  finalUrl: string;
+  headers: Record<string, string>;
+  extracted: ExtractedDocument;
 };
 
 function normalizeInputUrl(input: string) {
@@ -289,7 +314,7 @@ function collectTexts(
   );
 }
 
-function extractDocument(html: string, headers: Record<string, string>, finalUrl: string) {
+function extractDocument(html: string, finalUrl: string) {
   const $ = cheerio.load(html);
   const extractionErrors: string[] = [];
 
@@ -427,7 +452,8 @@ function extractDocument(html: string, headers: Record<string, string>, finalUrl
     Boolean(organizationName) &&
     articlePublisherName.toLowerCase() === organizationName.toLowerCase();
 
-  const bodyTextLength = textContent($("body").text()).length;
+  const bodyText = textContent($("body").text());
+  const bodyTextLength = bodyText.length;
   const extractedTextLength = extractedText.length;
   const rawHtmlContainsTitleText = Boolean(
     title && html.toLowerCase().includes(title.toLowerCase()),
@@ -486,6 +512,7 @@ function extractDocument(html: string, headers: Record<string, string>, finalUrl
     rawHtmlContainsTitleText,
     rawHtmlContainsArticleBody,
     extractionErrors,
+    bodyText,
   } satisfies ExtractedDocument;
 }
 
@@ -497,6 +524,148 @@ function shouldTryBrowserFallback(extracted: ExtractedDocument) {
   );
 }
 
+function isBlockedResponse(statusCode: number, extracted: ExtractedDocument) {
+  const title = extracted.title?.toLowerCase() ?? "";
+  const body = extracted.bodyText.toLowerCase();
+
+  return (
+    statusCode === 403 &&
+    title.includes("just a moment") &&
+    body.includes("just a moment") &&
+    !extracted.rawHtmlContainsArticleBody
+  );
+}
+
+function deriveSlugFromUrl(input: string) {
+  try {
+    const url = new URL(input);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1];
+    return last ? decodeURIComponent(last) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function metaDescriptionFromHtml(html: string) {
+  const $ = cheerio.load(html);
+  return textContent($.text()) || undefined;
+}
+
+function buildWordPressFallbackHtml(post: Record<string, unknown>, sourceUrl: string) {
+  const title = readString((post.title as { rendered?: unknown } | undefined)?.rendered);
+  const content = readString((post.content as { rendered?: unknown } | undefined)?.rendered);
+  const excerpt = readString((post.excerpt as { rendered?: unknown } | undefined)?.rendered);
+  const date = readString(post.date);
+  const modified = readString(post.modified);
+  const canonical = readString(post.link) || sourceUrl;
+  const embedded = (post._embedded as Record<string, unknown> | undefined) ?? {};
+  const authors = Array.isArray(embedded.author) ? embedded.author : [];
+  const authorName = readString((authors[0] as { name?: unknown } | undefined)?.name);
+  const metaDescription = metaDescriptionFromHtml(excerpt);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>${escapeHtml(title || "Article")}</title>
+    ${canonical ? `<link rel="canonical" href="${escapeHtml(canonical)}" />` : ""}
+    ${metaDescription ? `<meta name="description" content="${escapeHtml(metaDescription)}" />` : ""}
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    ${authorName ? `<meta name="author" content="${escapeHtml(authorName)}" />` : ""}
+  </head>
+  <body>
+    <main>
+      <article>
+        ${title ? `<h1>${title}</h1>` : ""}
+        ${authorName ? `<p class="author-byline">${escapeHtml(authorName)}</p>` : ""}
+        ${date ? `<time datetime="${escapeHtml(date)}">${escapeHtml(modified || date)}</time>` : ""}
+        ${excerpt ? `<div class="article-excerpt">${excerpt}</div>` : ""}
+        <div class="article-content">${content}</div>
+      </article>
+    </main>
+  </body>
+</html>`;
+}
+
+async function tryWordPressFallback(pageUrl: string): Promise<WordPressFallbackResult> {
+  const slug = deriveSlugFromUrl(pageUrl);
+  if (!slug) {
+    return { attempted: false };
+  }
+
+  const endpoint = new URL("/wp-json/wp/v2/posts", pageUrl);
+  endpoint.searchParams.set("slug", slug);
+  endpoint.searchParams.set("_embed", "1");
+
+  const response = await fetch(endpoint.toString(), {
+    headers: {
+      "user-agent": BROWSER_FALLBACK_USER_AGENT,
+      accept: "application/json,text/plain,*/*;q=0.5",
+      "accept-language": "en-US,en;q=0.9",
+      "cache-control": "no-cache",
+      pragma: "no-cache",
+    },
+    redirect: "follow",
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!response.ok) {
+    return {
+      attempted: true,
+      statusCode: response.status,
+    };
+  }
+
+  const payload = (await response.json()) as unknown;
+  if (!Array.isArray(payload) || payload.length === 0) {
+    return {
+      attempted: true,
+      statusCode: response.status,
+    };
+  }
+
+  const post = payload[0];
+  if (!post || typeof post !== "object") {
+    return {
+      attempted: true,
+      statusCode: response.status,
+    };
+  }
+
+  return {
+    attempted: true,
+    statusCode: response.status,
+    html: buildWordPressFallbackHtml(post as Record<string, unknown>, pageUrl),
+    sourceUrl: endpoint.toString(),
+  };
+}
+
+async function fetchAndExtract(url: string, mode: FetchMode): Promise<FetchedPage> {
+  const { response, responseTimeMs } = await fetchWithTiming(url, mode);
+  const html = await response.text();
+  const finalUrl = response.url;
+  const headers = toHeaderMap(response.headers);
+  const extracted = extractDocument(html, finalUrl);
+
+  return {
+    response,
+    responseTimeMs,
+    html,
+    finalUrl,
+    headers,
+    extracted,
+  };
+}
+
 function buildDebug(
   fetchedUrl: string,
   finalUrl: string,
@@ -506,6 +675,8 @@ function buildDebug(
   mode: FetchMode,
   browserFallbackTried: boolean,
   browserFallbackUsed: boolean,
+  blockedByProtection: boolean,
+  fallback: FallbackState,
 ): ScanDebug {
   return {
     fetchedUrl,
@@ -529,6 +700,11 @@ function buildDebug(
     browserFallbackUsed,
     renderedContentLikelyRequired:
       !extracted.rawHtmlContainsArticleBody && extracted.rawHtmlContainsTitleText,
+    blockedByProtection,
+    fallbackAttempted: fallback.attempted,
+    fallbackType: fallback.type,
+    fallbackSucceeded: fallback.succeeded,
+    fallbackStatusCode: fallback.statusCode,
   };
 }
 
@@ -537,52 +713,88 @@ export async function analyzeUrl(
   options: AnalyzeOptions = {},
 ): Promise<ScanResult> {
   const url = normalizeInputUrl(input);
-  const initialFetch = await fetchWithTiming(url, "scanner");
-  let response = initialFetch.response;
-  let responseTimeMs = initialFetch.responseTimeMs;
-  let html = await response.text();
-  let finalUrl = response.url;
-  let headers = toHeaderMap(response.headers);
-  let extracted = extractDocument(html, headers, finalUrl);
+  const initialPage = await fetchAndExtract(url, "scanner");
+
+  let page = initialPage;
   let fetchMode: FetchMode = "scanner";
   let browserFallbackTried = false;
   let browserFallbackUsed = false;
+  let fallback: FallbackState = {
+    attempted: false,
+    succeeded: false,
+  };
 
-  if (shouldTryBrowserFallback(extracted)) {
+  if (shouldTryBrowserFallback(page.extracted)) {
     browserFallbackTried = true;
 
     try {
-      const fallbackFetch = await fetchWithTiming(url, "browser-fallback");
-      const fallbackResponse = fallbackFetch.response;
-      const fallbackHtml = await fallbackResponse.text();
-      const fallbackHeaders = toHeaderMap(fallbackResponse.headers);
-      const fallbackExtracted = extractDocument(
-        fallbackHtml,
-        fallbackHeaders,
-        fallbackResponse.url,
-      );
+      const fallbackPage = await fetchAndExtract(url, "browser-fallback");
+      fallback = {
+        attempted: true,
+        type: "browser-fallback",
+        succeeded:
+          fallbackPage.extracted.wordCount > page.extracted.wordCount ||
+          fallbackPage.extracted.paragraphCount > page.extracted.paragraphCount ||
+          fallbackPage.extracted.headingCount > page.extracted.headingCount,
+        statusCode: fallbackPage.response.status,
+      };
 
-      const fallbackIsBetter =
-        fallbackExtracted.wordCount > extracted.wordCount ||
-        fallbackExtracted.paragraphCount > extracted.paragraphCount ||
-        fallbackExtracted.headingCount > extracted.headingCount;
-
-      if (fallbackIsBetter) {
-        response = fallbackResponse;
-        responseTimeMs = fallbackFetch.responseTimeMs;
-        html = fallbackHtml;
-        finalUrl = fallbackResponse.url;
-        headers = fallbackHeaders;
-        extracted = fallbackExtracted;
+      if (fallback.succeeded) {
+        page = fallbackPage;
         fetchMode = "browser-fallback";
         browserFallbackUsed = true;
       }
     } catch {
-      extracted.extractionErrors.push("browser-fallback-fetch-failed");
+      page.extracted.extractionErrors.push("browser-fallback-fetch-failed");
+      fallback = {
+        attempted: true,
+        type: "browser-fallback",
+        succeeded: false,
+      };
     }
   }
 
-  const finalParsedUrl = new URL(finalUrl);
+  const blockedByProtection = isBlockedResponse(page.response.status, page.extracted);
+
+  let analysisHtml = page.html;
+  let analysisExtracted = page.extracted;
+
+  if (blockedByProtection || !page.extracted.rawHtmlContainsArticleBody) {
+    try {
+      const wpFallback = await tryWordPressFallback(url);
+      if (wpFallback.attempted) {
+        fallback = {
+          attempted: true,
+          type: "wordpress-rest-api",
+          succeeded: Boolean(wpFallback.html),
+          statusCode: wpFallback.statusCode,
+        };
+      }
+
+      if (wpFallback.html) {
+        const wpExtracted = extractDocument(wpFallback.html, url);
+        const shouldUseFallback =
+          blockedByProtection ||
+          wpExtracted.wordCount > analysisExtracted.wordCount ||
+          wpExtracted.paragraphCount > analysisExtracted.paragraphCount ||
+          wpExtracted.headingCount > analysisExtracted.headingCount;
+
+        if (shouldUseFallback) {
+          analysisHtml = wpFallback.html;
+          analysisExtracted = wpExtracted;
+        }
+      }
+    } catch {
+      page.extracted.extractionErrors.push("wordpress-rest-api-fallback-failed");
+      fallback = {
+        attempted: true,
+        type: "wordpress-rest-api",
+        succeeded: false,
+      };
+    }
+  }
+
+  const finalParsedUrl = new URL(page.finalUrl);
 
   const robotsUrl = new URL("/robots.txt", finalParsedUrl.origin).toString();
   let robotsTxt = "";
@@ -604,7 +816,7 @@ export async function analyzeUrl(
       robotsReachable = true;
 
       const robots = robotsParser(robotsUrl, robotsTxt);
-      crawlAllowed = robots.isAllowed(finalUrl, SCAN_USER_AGENT);
+      crawlAllowed = robots.isAllowed(page.finalUrl, SCAN_USER_AGENT);
       sitemapUrls = robots.getSitemaps();
     }
   } catch {
@@ -632,48 +844,52 @@ export async function analyzeUrl(
 
   const context: ScanContext = {
     url,
-    finalUrl,
+    finalUrl: page.finalUrl,
     hostname: finalParsedUrl.hostname,
-    responseTimeMs,
-    statusCode: response.status,
-    contentType: response.headers.get("content-type") ?? "",
-    html,
-    htmlLang: extracted.htmlLang,
+    responseTimeMs: page.responseTimeMs,
+    statusCode: page.response.status,
+    contentType: page.response.headers.get("content-type") ?? "",
+    html: analysisHtml,
+    htmlLang: analysisExtracted.htmlLang,
     robotsTxt,
     robotsReachable,
     crawlAllowed,
     sitemapUrls,
-    headers,
-    title: extracted.title,
-    metaDescription: extracted.metaDescription,
-    metaRobots: extracted.metaRobots,
-    xRobotsTag: headers["x-robots-tag"],
-    canonical: extracted.canonical,
-    hasViewport: extracted.hasViewport,
-    h1Count: extracted.h1Count,
-    mainH1Count: extracted.mainH1Count,
-    mainHeadingText: extracted.mainHeadingText,
-    headingCount: extracted.headingCount,
-    paragraphCount: extracted.paragraphCount,
-    averageParagraphLength: extracted.averageParagraphLength,
-    wordCount: extracted.wordCount,
-    hasMainContent: extracted.hasMainContent,
-    authorText: extracted.authorText,
-    publicationDate: extracted.publicationDate,
-    socialLinks: extracted.socialLinks,
-    schemaSameAsLinks: extracted.schemaSameAsLinks,
-    externalPlatformLinks: extracted.externalPlatformLinks,
-    schemaNodes: extracted.schemaNodes,
-    schemaTypes: extracted.schemaTypes,
-    organizationSchema: extracted.organizationSchema,
-    personSchema: extracted.personSchema,
-    articleSchema: extracted.articleSchema,
-    publisherNameVisible: extracted.publisherNameVisible,
-    domainBrandSignal: extracted.domainBrandSignal,
-    organizationHasSameAs: extracted.organizationHasSameAs,
-    articleHasPublisherReference: extracted.articleHasPublisherReference,
-    articlePublisherMatchesOrganization: extracted.articlePublisherMatchesOrganization,
-    redirectsFollowed: finalUrl === url ? 0 : 1,
+    headers: page.headers,
+    title: analysisExtracted.title,
+    metaDescription: analysisExtracted.metaDescription,
+    metaRobots: analysisExtracted.metaRobots,
+    xRobotsTag: page.headers["x-robots-tag"],
+    canonical: analysisExtracted.canonical,
+    hasViewport: analysisExtracted.hasViewport,
+    h1Count: analysisExtracted.h1Count,
+    mainH1Count: analysisExtracted.mainH1Count,
+    mainHeadingText: analysisExtracted.mainHeadingText,
+    headingCount: analysisExtracted.headingCount,
+    paragraphCount: analysisExtracted.paragraphCount,
+    averageParagraphLength: analysisExtracted.averageParagraphLength,
+    wordCount: analysisExtracted.wordCount,
+    hasMainContent: analysisExtracted.hasMainContent,
+    authorText: analysisExtracted.authorText,
+    publicationDate: analysisExtracted.publicationDate,
+    socialLinks: analysisExtracted.socialLinks,
+    schemaSameAsLinks: analysisExtracted.schemaSameAsLinks,
+    externalPlatformLinks: analysisExtracted.externalPlatformLinks,
+    schemaNodes: analysisExtracted.schemaNodes,
+    schemaTypes: analysisExtracted.schemaTypes,
+    organizationSchema: analysisExtracted.organizationSchema,
+    personSchema: analysisExtracted.personSchema,
+    articleSchema: analysisExtracted.articleSchema,
+    publisherNameVisible: analysisExtracted.publisherNameVisible,
+    domainBrandSignal: analysisExtracted.domainBrandSignal,
+    organizationHasSameAs: analysisExtracted.organizationHasSameAs,
+    articleHasPublisherReference: analysisExtracted.articleHasPublisherReference,
+    articlePublisherMatchesOrganization: analysisExtracted.articlePublisherMatchesOrganization,
+    redirectsFollowed: page.finalUrl === url ? 0 : 1,
+    blockedByProtection,
+    fallbackAttempted: fallback.attempted,
+    fallbackType: fallback.type,
+    fallbackSucceeded: fallback.succeeded,
   };
 
   const result = buildScanResult(context);
@@ -681,13 +897,15 @@ export async function analyzeUrl(
   if (options.debug) {
     result.debug = buildDebug(
       url,
-      finalUrl,
-      response.status,
-      html,
-      extracted,
+      page.finalUrl,
+      page.response.status,
+      analysisHtml,
+      analysisExtracted,
       fetchMode,
       browserFallbackTried,
       browserFallbackUsed,
+      blockedByProtection,
+      fallback,
     );
   }
 

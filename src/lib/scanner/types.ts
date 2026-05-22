@@ -81,6 +81,8 @@ export type ScanResult = {
   debug?: ScanDebug;
 };
 
+export type FallbackType = "browser-fallback" | "wordpress-rest-api";
+
 export type ScanDebug = {
   fetchedUrl: string;
   finalUrl: string;
@@ -102,6 +104,11 @@ export type ScanDebug = {
   browserFallbackTried: boolean;
   browserFallbackUsed: boolean;
   renderedContentLikelyRequired: boolean;
+  blockedByProtection: boolean;
+  fallbackAttempted: boolean;
+  fallbackType?: FallbackType;
+  fallbackSucceeded: boolean;
+  fallbackStatusCode?: number;
 };
 
 export type JsonLdNode = Record<string, unknown>;
@@ -150,4 +157,8 @@ export type ScanContext = {
   articleHasPublisherReference: boolean;
   articlePublisherMatchesOrganization: boolean;
   redirectsFollowed: number;
+  blockedByProtection: boolean;
+  fallbackAttempted: boolean;
+  fallbackType?: FallbackType;
+  fallbackSucceeded: boolean;
 };

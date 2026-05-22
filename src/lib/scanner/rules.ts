@@ -152,6 +152,35 @@ export const RULES: RuleDefinition[] = [
     ],
   },
   {
+    id: "fetch_access_blocked",
+    rootCause: "fetch_access",
+    pillar: "DELIVERY",
+    component: "Access",
+    weight: 8,
+    severity: "high",
+    check: "detect bot or browser protection interstitials",
+    pass_condition: "scanner receives the real page instead of a protection screen",
+    message: "Page fetch is blocked by bot or browser protection",
+    explanation: "The scanner reached a protection screen instead of the article page.",
+    impact: "AI systems and crawlers cannot analyze the real page when access is blocked first. That weakens retrieval, interpretation, and attribution.",
+    whatToDo: "Allow machine access to the page or provide a machine-readable fallback.",
+    howToDoIt: [
+      "Ask your developer to confirm whether bot protection, firewall rules, or security settings are blocking server-side page fetches.",
+      "If this page should be accessible to crawlers and AI systems, allow safe read access to the public article page.",
+      "If direct page HTML cannot be opened reliably, provide a machine-readable fallback such as a WordPress API endpoint that exposes the article title, body, date, and author.",
+    ],
+    assignments: [
+      {
+        role: "Developer",
+        responsibility: "Confirm which security or bot-protection setting is blocking page fetches and allow safe access to the public article HTML or API output.",
+      },
+      {
+        role: "Brand / Marketing",
+        responsibility: "Confirm whether these pages are meant to be available for search engines and AI systems to access and cite.",
+      },
+    ],
+  },
+  {
     id: "h1_present",
     rootCause: "article_structure",
     pillar: "INTERPRETATION",
