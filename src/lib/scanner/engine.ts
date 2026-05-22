@@ -70,7 +70,7 @@ function hasStrongArticleStructure(context: ScanContext) {
 }
 
 function contentAnalysisBlocked(context: ScanContext) {
-  return context.blockedByProtection && !context.fallbackSucceeded;
+  return retrievalStatus(context) === "BLOCKED";
 }
 
 function normalizeWords(value: string | undefined) {
@@ -810,11 +810,19 @@ function buildPillarSummary(
 }
 
 function retrievalStatus(context: ScanContext): RetrievalStatus {
-  if (context.blockedByProtection) {
+  const blocked =
+    context.blockedByProtection ||
+    context.statusCode === 403 ||
+    context.statusCode === 429 ||
+    context.isCloudflareChallenge ||
+    context.titleContainsChallenge ||
+    !context.articleBodyRetrieved;
+
+  if (blocked) {
     return "BLOCKED";
   }
 
-  if (context.fallbackAttempted || context.fallbackSucceeded) {
+  if (context.articleBodyRetrieved && (context.fallbackAttempted || context.fallbackSucceeded)) {
     return "PARTIAL";
   }
 
@@ -1028,6 +1036,8 @@ export function buildScanResult(context: ScanContext): ScanResult {
     ? evaluatedRules.filter((rule) => BLOCKED_DISPLAY_RULES.has(rule.id))
     : evaluatedRules;
 
+  const blockedRetrieval = contentAnalysisBlocked(context);
+
   const pillars: PillarResult[] = ([
     "FINDABILITY",
     "INTERPRETATION",
@@ -1036,16 +1046,25 @@ export function buildScanResult(context: ScanContext): ScanResult {
   ] as const).map((pillar) => {
     const pillarRules = evaluatedRules.filter((rule) => rule.pillar === pillar);
     const pillarDisplayRules = displayRules.filter((rule) => rule.pillar === pillar);
+    const scoringRules = blockedRetrieval
+      ? pillar === "INTERPRETATION" || pillar === "ATTRIBUTION"
+        ? []
+        : pillar === "DELIVERY"
+          ? pillarDisplayRules
+          : pillarRules
+      : pillarRules;
     const baseScore = 25;
-    const penalty = pillarPenalty(pillar, pillarRules);
-    const criticalCount = pillarRules.filter(
+    const penalty = pillarPenalty(pillar, scoringRules);
+    const criticalCount = scoringRules.filter(
       (rule) => rule.status !== "pass" && CRITICAL_RULES.has(rule.id),
     ).length;
     const stackingPenalty = criticalCount > 1 ? (criticalCount - 1) * 2 : 0;
     const uncappedScore = Math.max(0, baseScore - penalty - stackingPenalty);
-    const score = Math.min(uncappedScore, pillarCap(pillar, pillarRules));
+    const score = blockedRetrieval && (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION")
+      ? 0
+      : Math.min(uncappedScore, pillarCap(pillar, scoringRules));
     const confidence =
-      contentAnalysisBlocked(context) &&
+      blockedRetrieval &&
       (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION")
         ? "LOW"
         : pillarConfidence(score);

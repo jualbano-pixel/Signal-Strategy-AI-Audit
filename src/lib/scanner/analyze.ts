@@ -109,6 +109,12 @@ type WordPressFallbackResult = {
   sourceUrl?: string;
 };
 
+type BlockedDetection = {
+  blockedByProtection: boolean;
+  titleContainsChallenge: boolean;
+  isCloudflareChallenge: boolean;
+};
+
 type FetchedPage = {
   response: Response;
   responseTimeMs: number;
@@ -531,23 +537,30 @@ function shouldTryBrowserFallback(extracted: ExtractedDocument) {
   );
 }
 
-function isBlockedResponse(
+function detectBlockedRetrieval(
   statusCode: number,
   extracted: ExtractedDocument,
   headers: Record<string, string>,
-) {
+): BlockedDetection {
   const title = extracted.title?.toLowerCase() ?? "";
   const body = extracted.bodyText.toLowerCase();
   const serverHeader = headers.server?.toLowerCase() ?? "";
-  const cloudflareHeaderPresent = Boolean(headers["cf-ray"]) || serverHeader.includes("cloudflare");
-  const protectionPhraseDetected =
-    title.includes("just a moment") || body.includes("just a moment") || cloudflareHeaderPresent;
-
-  return (
+  const cloudflareHeaderPresent =
+    Boolean(headers["cf-ray"]) || serverHeader.includes("cloudflare");
+  const titleContainsChallenge = title.includes("just a moment");
+  const bodyContainsChallenge = body.includes("just a moment");
+  const isCloudflareChallenge =
+    cloudflareHeaderPresent || titleContainsChallenge || bodyContainsChallenge;
+  const blockedByProtection =
     (statusCode === 403 || statusCode === 429) &&
-    protectionPhraseDetected &&
-    !extracted.rawHtmlContainsArticleBody
-  );
+    isCloudflareChallenge &&
+    !extracted.rawHtmlContainsArticleBody;
+
+  return {
+    blockedByProtection,
+    titleContainsChallenge,
+    isCloudflareChallenge,
+  };
 }
 
 function deriveSlugFromUrl(input: string) {
@@ -749,17 +762,17 @@ export async function analyzeUrl(
     succeeded: false,
   };
 
-  const initialBlockedByProtection = isBlockedResponse(
+  const initialBlockedDetection = detectBlockedRetrieval(
     page.response.status,
     page.extracted,
     page.headers,
   );
 
-  if (shouldTryBrowserFallback(page.extracted) || initialBlockedByProtection) {
+  if (shouldTryBrowserFallback(page.extracted) || initialBlockedDetection.blockedByProtection) {
     browserFallbackTried = true;
     fetchProfilesTried.push("browser-fallback");
 
-    if (initialBlockedByProtection) {
+    if (initialBlockedDetection.blockedByProtection) {
       retryDelayMs += BLOCKED_RETRY_DELAY_MS;
       await delay(BLOCKED_RETRY_DELAY_MS);
     }
@@ -791,11 +804,12 @@ export async function analyzeUrl(
     }
   }
 
-  const blockedByProtection = isBlockedResponse(
+  const directBlockedDetection = detectBlockedRetrieval(
     page.response.status,
     page.extracted,
     page.headers,
   );
+  const blockedByProtection = directBlockedDetection.blockedByProtection;
 
   let analysisHtml = page.html;
   let analysisExtracted = page.extracted;
@@ -933,6 +947,9 @@ export async function analyzeUrl(
     articlePublisherMatchesOrganization: analysisExtracted.articlePublisherMatchesOrganization,
     redirectsFollowed: page.finalUrl === url ? 0 : 1,
     blockedByProtection,
+    articleBodyRetrieved: analysisExtracted.rawHtmlContainsArticleBody,
+    titleContainsChallenge: directBlockedDetection.titleContainsChallenge,
+    isCloudflareChallenge: directBlockedDetection.isCloudflareChallenge,
     fallbackAttempted: fallback.attempted,
     fallbackType: fallback.type,
     fallbackSucceeded: fallback.succeeded,

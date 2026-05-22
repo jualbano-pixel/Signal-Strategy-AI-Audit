@@ -165,6 +165,9 @@ export type ScanContext = {
   articlePublisherMatchesOrganization: boolean;
   redirectsFollowed: number;
   blockedByProtection: boolean;
+  articleBodyRetrieved: boolean;
+  titleContainsChallenge: boolean;
+  isCloudflareChallenge: boolean;
   fallbackAttempted: boolean;
   fallbackType?: FallbackType;
   fallbackSucceeded: boolean;
