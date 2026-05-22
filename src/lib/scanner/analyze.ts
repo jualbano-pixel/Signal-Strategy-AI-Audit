@@ -527,11 +527,12 @@ function shouldTryBrowserFallback(extracted: ExtractedDocument) {
 function isBlockedResponse(statusCode: number, extracted: ExtractedDocument) {
   const title = extracted.title?.toLowerCase() ?? "";
   const body = extracted.bodyText.toLowerCase();
+  const protectionPhraseDetected =
+    title.includes("just a moment") || body.includes("just a moment");
 
   return (
-    statusCode === 403 &&
-    title.includes("just a moment") &&
-    body.includes("just a moment") &&
+    (statusCode === 403 || statusCode === 429) &&
+    protectionPhraseDetected &&
     !extracted.rawHtmlContainsArticleBody
   );
 }
