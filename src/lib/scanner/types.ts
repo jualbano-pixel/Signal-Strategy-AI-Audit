@@ -78,6 +78,30 @@ export type ScanResult = {
   quick_wins: string[];
   explanation: string;
   scanned_at: string;
+  debug?: ScanDebug;
+};
+
+export type ScanDebug = {
+  fetchedUrl: string;
+  finalUrl: string;
+  statusCode: number;
+  htmlLength: number;
+  bodyTextLength: number;
+  extractedTextLength: number;
+  headingCount: number;
+  paragraphCount: number;
+  h1Candidates: string[];
+  title?: string;
+  metaDescription?: string;
+  canonical?: string;
+  detectedArticleSelectors: string[];
+  extractionErrors: string[];
+  rawHtmlContainsTitleText: boolean;
+  rawHtmlContainsArticleBody: boolean;
+  fetchMode: "scanner" | "browser-fallback";
+  browserFallbackTried: boolean;
+  browserFallbackUsed: boolean;
+  renderedContentLikelyRequired: boolean;
 };
 
 export type JsonLdNode = Record<string, unknown>;

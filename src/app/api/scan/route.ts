@@ -4,8 +4,9 @@ import { analyzeUrl } from "@/lib/scanner/analyze";
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { url?: string };
+    const body = (await request.json()) as { url?: string; debug?: boolean };
     const input = body.url?.trim();
+    const debug = body.debug === true || request.nextUrl.searchParams.get("debug") === "1";
 
     if (!input) {
       return NextResponse.json(
@@ -14,7 +15,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await analyzeUrl(input);
+    const result = await analyzeUrl(input, { debug });
 
     return NextResponse.json(result);
   } catch (error) {
