@@ -27,6 +27,8 @@ const SOCIAL_HOSTS = [
   "substack.com",
 ];
 
+const BLOCKED_RETRY_DELAY_MS = 1200;
+
 const ARTICLE_CONTAINER_SELECTORS = [
   "main",
   "article",
@@ -256,9 +258,10 @@ function extractSameDomainExternalLinks(
   });
 }
 
-function buildHeaders(mode: FetchMode) {
+function buildHeaders(mode: FetchMode, targetUrl: string) {
   const userAgent =
     mode === "browser-fallback" ? BROWSER_FALLBACK_USER_AGENT : SCAN_USER_AGENT;
+  const referer = new URL(targetUrl).origin + "/";
 
   return {
     "user-agent": userAgent,
@@ -267,14 +270,18 @@ function buildHeaders(mode: FetchMode) {
     "accept-language": "en-US,en;q=0.9",
     "cache-control": "no-cache",
     pragma: "no-cache",
+    connection: "keep-alive",
     ...(mode === "browser-fallback"
       ? {
           "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not/A)Brand";v="99"',
           "sec-ch-ua-mobile": "?0",
           "sec-ch-ua-platform": '"Windows"',
+          "accept-encoding": "gzip, deflate, br",
+          referer,
           "sec-fetch-dest": "document",
           "sec-fetch-mode": "navigate",
-          "sec-fetch-site": "none",
+          "sec-fetch-site": "same-origin",
+          "sec-fetch-user": "?1",
           "upgrade-insecure-requests": "1",
         }
       : {}),
@@ -284,7 +291,7 @@ function buildHeaders(mode: FetchMode) {
 async function fetchWithTiming(url: string, mode: FetchMode) {
   const started = performance.now();
   const response = await fetch(url, {
-    headers: buildHeaders(mode),
+    headers: buildHeaders(mode, url),
     redirect: "follow",
     signal: AbortSignal.timeout(10000),
   });
@@ -524,11 +531,17 @@ function shouldTryBrowserFallback(extracted: ExtractedDocument) {
   );
 }
 
-function isBlockedResponse(statusCode: number, extracted: ExtractedDocument) {
+function isBlockedResponse(
+  statusCode: number,
+  extracted: ExtractedDocument,
+  headers: Record<string, string>,
+) {
   const title = extracted.title?.toLowerCase() ?? "";
   const body = extracted.bodyText.toLowerCase();
+  const serverHeader = headers.server?.toLowerCase() ?? "";
+  const cloudflareHeaderPresent = Boolean(headers["cf-ray"]) || serverHeader.includes("cloudflare");
   const protectionPhraseDetected =
-    title.includes("just a moment") || body.includes("just a moment");
+    title.includes("just a moment") || body.includes("just a moment") || cloudflareHeaderPresent;
 
   return (
     (statusCode === 403 || statusCode === 429) &&
@@ -650,6 +663,10 @@ async function tryWordPressFallback(pageUrl: string): Promise<WordPressFallbackR
   };
 }
 
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchAndExtract(url: string, mode: FetchMode): Promise<FetchedPage> {
   const { response, responseTimeMs } = await fetchWithTiming(url, mode);
   const html = await response.text();
@@ -678,6 +695,8 @@ function buildDebug(
   browserFallbackUsed: boolean,
   blockedByProtection: boolean,
   fallback: FallbackState,
+  fetchProfilesTried: FetchMode[],
+  retryDelayMs: number,
 ): ScanDebug {
   return {
     fetchedUrl,
@@ -697,8 +716,11 @@ function buildDebug(
     rawHtmlContainsTitleText: extracted.rawHtmlContainsTitleText,
     rawHtmlContainsArticleBody: extracted.rawHtmlContainsArticleBody,
     fetchMode: mode,
+    fetchProfileUsed: mode,
+    fetchProfilesTried,
     browserFallbackTried,
     browserFallbackUsed,
+    retryDelayMs,
     renderedContentLikelyRequired:
       !extracted.rawHtmlContainsArticleBody && extracted.rawHtmlContainsTitleText,
     blockedByProtection,
@@ -718,15 +740,29 @@ export async function analyzeUrl(
 
   let page = initialPage;
   let fetchMode: FetchMode = "scanner";
+  const fetchProfilesTried: FetchMode[] = ["scanner"];
   let browserFallbackTried = false;
   let browserFallbackUsed = false;
+  let retryDelayMs = 0;
   let fallback: FallbackState = {
     attempted: false,
     succeeded: false,
   };
 
-  if (shouldTryBrowserFallback(page.extracted)) {
+  const initialBlockedByProtection = isBlockedResponse(
+    page.response.status,
+    page.extracted,
+    page.headers,
+  );
+
+  if (shouldTryBrowserFallback(page.extracted) || initialBlockedByProtection) {
     browserFallbackTried = true;
+    fetchProfilesTried.push("browser-fallback");
+
+    if (initialBlockedByProtection) {
+      retryDelayMs += BLOCKED_RETRY_DELAY_MS;
+      await delay(BLOCKED_RETRY_DELAY_MS);
+    }
 
     try {
       const fallbackPage = await fetchAndExtract(url, "browser-fallback");
@@ -755,12 +791,21 @@ export async function analyzeUrl(
     }
   }
 
-  const blockedByProtection = isBlockedResponse(page.response.status, page.extracted);
+  const blockedByProtection = isBlockedResponse(
+    page.response.status,
+    page.extracted,
+    page.headers,
+  );
 
   let analysisHtml = page.html;
   let analysisExtracted = page.extracted;
 
   if (blockedByProtection || !page.extracted.rawHtmlContainsArticleBody) {
+    if (blockedByProtection) {
+      retryDelayMs += BLOCKED_RETRY_DELAY_MS;
+      await delay(BLOCKED_RETRY_DELAY_MS);
+    }
+
     try {
       const wpFallback = await tryWordPressFallback(url);
       if (wpFallback.attempted) {
@@ -907,6 +952,8 @@ export async function analyzeUrl(
       browserFallbackUsed,
       blockedByProtection,
       fallback,
+      fetchProfilesTried,
+      retryDelayMs,
     );
   }
 

@@ -101,8 +101,11 @@ export type ScanDebug = {
   rawHtmlContainsTitleText: boolean;
   rawHtmlContainsArticleBody: boolean;
   fetchMode: "scanner" | "browser-fallback";
+  fetchProfileUsed: "scanner" | "browser-fallback";
+  fetchProfilesTried: Array<"scanner" | "browser-fallback">;
   browserFallbackTried: boolean;
   browserFallbackUsed: boolean;
+  retryDelayMs: number;
   renderedContentLikelyRequired: boolean;
   blockedByProtection: boolean;
   fallbackAttempted: boolean;
