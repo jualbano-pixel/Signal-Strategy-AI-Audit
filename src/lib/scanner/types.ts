@@ -62,15 +62,19 @@ export type PillarResult = {
   unclear: string[];
 };
 
+export type RetrievalStatus = "OK" | "PARTIAL" | "BLOCKED";
+
 export type ScoreLabel =
   | "AI-Ready"
   | "AI-Ready with Gaps"
   | "At Risk"
-  | "Failing";
+  | "Failing"
+  | "Machine Retrieval Blocked";
 
 export type ScanResult = {
   url: string;
   total_score: number;
+  retrievalStatus: RetrievalStatus;
   status: ScoreLabel;
   status_reason: string;
   pillars: PillarResult[];

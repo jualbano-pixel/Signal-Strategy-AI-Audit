@@ -8,6 +8,7 @@ import {
   RuleStatus,
   ScanContext,
   ScanResult,
+  RetrievalStatus,
 } from "@/lib/scanner/types";
 
 const CRITICAL_RULES = new Set([
@@ -808,6 +809,18 @@ function buildPillarSummary(
   return `${name.replaceAll("_", " ")} is mainly limited by ${topProblem.component.toLowerCase()}.`;
 }
 
+function retrievalStatus(context: ScanContext): RetrievalStatus {
+  if (context.blockedByProtection) {
+    return "BLOCKED";
+  }
+
+  if (context.fallbackAttempted || context.fallbackSucceeded) {
+    return "PARTIAL";
+  }
+
+  return "OK";
+}
+
 function pillarConfidence(score: number): "HIGH" | "MEDIUM" | "LOW" {
   if (score >= 20) return "HIGH";
   if (score >= 14) return "MEDIUM";
@@ -943,7 +956,17 @@ function buildSignalsSummary(
 function overallStatus(
   totalScore: number,
   pillars: PillarResult[],
+  context: ScanContext,
+  currentRetrievalStatus: RetrievalStatus,
 ): Pick<ScanResult, "status" | "status_reason"> {
+  if (currentRetrievalStatus === "BLOCKED") {
+    return {
+      status: "Machine Retrieval Blocked",
+      status_reason:
+        "The scanner reached a protection screen before it could retrieve the real article HTML.",
+    };
+  }
+
   const lowPillars = pillars.filter((pillar) => pillar.confidence === "LOW");
   const mediumPillars = pillars.filter((pillar) => pillar.confidence === "MEDIUM");
   const criticalCompromised = pillars.filter(
@@ -987,7 +1010,11 @@ function overallStatus(
   };
 }
 
-function buildExplanation(pillars: PillarResult[]) {
+function buildExplanation(pillars: PillarResult[], currentRetrievalStatus: RetrievalStatus) {
+  if (currentRetrievalStatus === "BLOCKED") {
+    return "The scan was blocked by site protection before it could retrieve the real page content. This result reflects access failure first, not ordinary article-quality analysis.";
+  }
+
   const strongest = [...pillars].sort((a, b) => b.score - a.score)[0];
   const weakest = [...pillars].sort((a, b) => a.score - b.score)[0];
 
@@ -996,6 +1023,7 @@ function buildExplanation(pillars: PillarResult[]) {
 
 export function buildScanResult(context: ScanContext): ScanResult {
   const evaluatedRules = RULES.map((rule) => evaluateRule(rule, context));
+  const currentRetrievalStatus = retrievalStatus(context);
   const displayRules = contentAnalysisBlocked(context)
     ? evaluatedRules.filter((rule) => BLOCKED_DISPLAY_RULES.has(rule.id))
     : evaluatedRules;
@@ -1016,11 +1044,16 @@ export function buildScanResult(context: ScanContext): ScanResult {
     const stackingPenalty = criticalCount > 1 ? (criticalCount - 1) * 2 : 0;
     const uncappedScore = Math.max(0, baseScore - penalty - stackingPenalty);
     const score = Math.min(uncappedScore, pillarCap(pillar, pillarRules));
+    const confidence =
+      contentAnalysisBlocked(context) &&
+      (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION")
+        ? "LOW"
+        : pillarConfidence(score);
 
     return {
       name: pillar,
       score,
-      confidence: pillarConfidence(score),
+      confidence,
       issues: pillarDisplayRules.filter((rule) => rule.status !== "pass"),
       summary: buildPillarSummary(pillar, pillarDisplayRules, context),
       ...buildSignalsSummary(pillarDisplayRules, context, pillar),
@@ -1028,7 +1061,12 @@ export function buildScanResult(context: ScanContext): ScanResult {
   });
 
   const totalScore = pillars.reduce((sum, pillar) => sum + pillar.score, 0);
-  const { status, status_reason } = overallStatus(totalScore, pillars);
+  const { status, status_reason } = overallStatus(
+    totalScore,
+    pillars,
+    context,
+    currentRetrievalStatus,
+  );
   const prioritized = dedupeByRootCause(
     displayRules
       .filter((rule) => rule.status !== "pass")
@@ -1045,6 +1083,7 @@ export function buildScanResult(context: ScanContext): ScanResult {
   return {
     url: normalizeUrl(context.url),
     total_score: Math.round(totalScore),
+    retrievalStatus: currentRetrievalStatus,
     status,
     status_reason,
     pillars,
@@ -1053,7 +1092,7 @@ export function buildScanResult(context: ScanContext): ScanResult {
       .slice(0, 3)
       .map((rule) => rule.whatToDo)
       .filter(Boolean),
-    explanation: buildExplanation(pillars),
+    explanation: buildExplanation(pillars, currentRetrievalStatus),
     scanned_at: new Date().toISOString(),
   };
 }

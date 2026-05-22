@@ -100,6 +100,10 @@ function issueTone(status: "pass" | "warn" | "fail") {
 }
 
 function statusDescription(status: ScanResult["status"]) {
+  if (status === "Machine Retrieval Blocked") {
+    return "The scanner hit site protection before it could retrieve the real article, so this result reflects access failure first.";
+  }
+
   if (status === "AI-Ready") {
     return "This page gives machines clear publisher details, author information, and content context.";
   }
@@ -172,6 +176,7 @@ export default function Home() {
       "",
       `URL scanned: ${scan.url}`,
       `Overall score: ${scan.total_score}/100`,
+      `Retrieval status: ${scan.retrievalStatus}`,
       `Status: ${scan.status}`,
       "",
       "Pillar Scores",
