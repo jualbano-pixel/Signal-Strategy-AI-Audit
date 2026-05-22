@@ -225,7 +225,7 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, debug: true }),
       });
 
       const payload = (await response.json()) as ScanResult | { error: string };
