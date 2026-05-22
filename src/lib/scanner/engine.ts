@@ -38,7 +38,6 @@ const LOW_VALUE_STRUCTURE_RULES = new Set([
 
 const BLOCKED_DISPLAY_RULES = new Set([
   "fetch_access_blocked",
-  "redirect_health",
   "robots_accessible",
   "crawlability_allowed",
   "sitemap_present",
@@ -790,6 +789,10 @@ function buildPillarSummary(
   context: ScanContext,
 ) {
   if (contentAnalysisBlocked(context)) {
+    if (name === "FINDABILITY") {
+      return "Basic site discovery signals were found, but this page could not be confirmed as machine-retrievable.";
+    }
+
     if (name === "INTERPRETATION" || name === "ATTRIBUTION") {
       return `${name.replaceAll("_", " ")} could not be fully analyzed because page access was blocked before the article loaded.`;
     }
@@ -867,11 +870,23 @@ function buildSignalsSummary(
   pillar: PillarName,
 ) {
   if (contentAnalysisBlocked(context)) {
+    if (pillar === "FINDABILITY") {
+      return {
+        detected: [
+          "robots.txt is reachable.",
+          ...(context.sitemapUrls.length > 0 ? ["Found sitemap signals."] : []),
+        ],
+        unclear: [
+          "The article page itself could not be confirmed as crawlable because the scanner reached a protection screen.",
+        ],
+      };
+    }
+
     if (pillar === "INTERPRETATION" || pillar === "ATTRIBUTION") {
       return {
         detected: [],
         unclear: [
-          "This pillar could not be confirmed because the scan reached a protection screen instead of the article.",
+          "This pillar could not be fully analyzed because page access was blocked before the article loaded.",
         ],
       };
     }
